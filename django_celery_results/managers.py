@@ -6,11 +6,14 @@ import warnings
 from functools import wraps
 from itertools import count
 
+from datetime import timedelta, datetime, timezone
+
 from celery.utils.time import maybe_timedelta
 
 from django.db import connections, router, transaction
 from django.db import models
 from django.conf import settings
+from django.db.models.query_utils import Q
 
 from .utils import now
 
@@ -162,11 +165,26 @@ class TaskResultManager(models.Manager):
             return settings.DATABASE_ENGINE
 
     def get_all_expired(self, expires, app):
-        """Get all expired task results."""
-        if app.conf.expires_filters_args or app.conf.expires_filters_kwargs:
-            return self.filter(
-                *app.conf.expires_filters_args,
-                **app.conf.expires_filters_kwargs)
+        """
+        Get all expired task results.
+        expires_filters is a list of list where each element
+        """
+        query = Q()
+        configed_task_names = []
+        if app.conf.expires_filters:
+            for filter in app.conf.expires_filters:
+                condition = Q(
+                    task_name=filter['task_name'],
+                    date_done__lt=datetime.now(tz=timezone.utc) -
+                    timedelta(
+                        seconds=filter['duration']))
+                query |= condition
+                configed_task_names.append(filter['task_name'])
+
+            default_filter = Q(~Q(task_name__in=configed_task_names),
+                               date_done__lt=now() - maybe_timedelta(expires))
+            query |= default_filter
+            return self.filter(query)
         return self.filter(date_done__lt=now() - maybe_timedelta(expires))
 
     def delete_expired(self, expires, app):
